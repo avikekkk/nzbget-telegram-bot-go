@@ -15,8 +15,10 @@ if [[ ! -f config.env ]]; then
     exit 1
 fi
 
-go build -o nzbget-bot ./cmd/nzbget-bot
+# Binaries go under bin/ so a build can never collide with a directory of the
+# same name, and the repo root stays clean.
+go build -o bin/nzbget-bot ./cmd/nzbget-bot
 
 # exec, so Ctrl+C goes straight to the bot: it traps SIGINT and shuts its
 # database and Telegram session down on the way out.
-exec ./nzbget-bot
+exec ./bin/nzbget-bot

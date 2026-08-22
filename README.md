@@ -24,7 +24,7 @@ The bot talks MTProto through [gotd](https://github.com/gotd/td), so it needs
 3. Build:
 
 ```bash
-go build -o nzbget-bot ./cmd/nzbget-bot
+go build -o bin/nzbget-bot ./cmd/nzbget-bot
 ```
 
 `./start.sh` does this for you before launching.
@@ -93,6 +93,25 @@ go run ./cmd/nzbget-bot
 - `/clear` - Wipe NZBGet queue + history (admin only)
 - `/auth` - Authorize chat/user (admin only)
 - `/unauth` - Remove authorization (admin only)
+
+### BotFather command menu
+
+To populate the command menu in Telegram clients, send `/setcommands` to [@BotFather](https://t.me/BotFather), pick the bot, and paste:
+
+```text
+help - Show the bot commands
+search - [query] search NZBs. Flags: --mx largest first, --mn smallest first
+grab - [ID-1] [ID-2]... add NZBs from search results, or reply to a .nzb file
+status - Live NZBGet queue status
+cancel - [ID-1] [ID-2]... cancel queued downloads
+server - NZBGet and system stats
+logs - Bot log file (admin only)
+clear - Wipe the NZBGet queue and history (admin only)
+auth - [id] authorize a user or chat (admin only)
+unauth - [id] remove authorization (admin only)
+```
+
+The admin commands are listed for completeness; non-admins are rejected either way. To keep them out of the public menu, set the shorter list for the "All private chats" scope and the full list for your own chat only.
 
 ## Data files
 The bot writes `log.txt`, `bot.db` (SQLite) and `session.json` to `DATA_DIR`, which defaults

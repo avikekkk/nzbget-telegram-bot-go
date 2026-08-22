@@ -7,8 +7,8 @@ config.env
 # Session file (contains a live login)
 session.json
 
-# Compiled binary
-/nzbget-bot
+# Compiled binaries
+/bin/
 
 # Runtime data: DATA_DIR defaults to the working directory
 *.db
