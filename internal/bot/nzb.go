@@ -547,7 +547,7 @@ func downloadStats(group nzbget.Group, speed int64, health string) string {
 	stats := fmt.Sprintf("<code>%s</code>\n", util.ProgressBar(progress))
 	stats += fmt.Sprintf("<code>%s</code> <code>/</code> <code>%s</code>\n",
 		util.ConvertSize(group.DownloadedSize), util.ConvertSize(group.FileSize))
-	stats += fmt.Sprintf("<code>↓%s/s</code> <code>|</code> <code>ETA</code> : <code>%s</code>",
+	stats += fmt.Sprintf("↓<code>%s/s</code> <code>|</code> <code>ETA</code> : <code>%s</code>",
 		util.ConvertSize(speed), util.TimeFormat(eta))
 	return withHealth(stats, health)
 }
@@ -561,7 +561,7 @@ func transferStats(group nzbget.Group, health string) string {
 	match := transferPattern.FindStringSubmatch(group.PostInfoText)
 	if match == nil {
 		stats := fmt.Sprintf("<code>%s</code>\n", util.ProgressBar(0))
-		stats += "<code>↑0B/s</code> <code>|</code> <code>ETA</code> : <code>N/A</code>"
+		stats += "↑<code>0B/s</code> <code>|</code> <code>ETA</code> : <code>N/A</code>"
 		return withHealth(stats, health)
 	}
 
@@ -569,7 +569,7 @@ func transferStats(group nzbget.Group, health string) string {
 	stats := fmt.Sprintf("<code>%s</code>\n", util.ProgressBar(percentage))
 	stats += fmt.Sprintf("<code>%s %s</code> <code>/</code> <code>%s %s</code>\n",
 		match[1], match[2], match[3], match[4])
-	stats += fmt.Sprintf("<code>↑%s%s/s</code> <code>|</code> <code>ETA</code> : <code>%s</code>",
+	stats += fmt.Sprintf("↑<code>%s%s/s</code> <code>|</code> <code>ETA</code> : <code>%s</code>",
 		match[6], match[7], match[8])
 	return withHealth(stats, health)
 }
