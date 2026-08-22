@@ -24,6 +24,11 @@ const (
 	telegraphAuthor = "USENET"
 )
 
+// redactedMessage replaces a result list once it is hidden, manually or on the
+// redaction timer. It is a notice about the message, not content from it, so
+// it is plain text; only indexer-supplied names stay monospace.
+const redactedMessage = "RESULTS REDACTED"
+
 // searchSession is one rendered set of results, kept so its pagination buttons
 // keep working after the message is sent.
 type searchSession struct {
@@ -200,7 +205,7 @@ func (b *Bot) scheduleAutoRedact(token string, target tg.InputPeerClass, msgID i
 			return
 		}
 		b.redactTelegraph(b.runCtx, expired)
-		if err := b.edit(b.runCtx, target, msgID, "<code>RESULTS REDACTED</code>"); err != nil {
+		if err := b.edit(b.runCtx, target, msgID, redactedMessage); err != nil {
 			b.log.Debug("Could not mark results redacted", "err", err)
 		}
 	}()
@@ -327,7 +332,7 @@ func (b *Bot) onSearchCallback(cb *callback) error {
 			}
 			b.redactTelegraph(cb.ctx, closed)
 		}
-		if err := b.edit(cb.ctx, cb.peer, cb.msgID, "<code>RESULTS REDACTED</code>"); err != nil {
+		if err := b.edit(cb.ctx, cb.peer, cb.msgID, redactedMessage); err != nil {
 			b.log.Debug("Could not mark results redacted", "err", err)
 		}
 		return b.answer(cb.ctx, cb.queryID, "Closed", false)
@@ -365,7 +370,7 @@ func (b *Bot) onSearchCallback(cb *callback) error {
 // parseSearchArgs splits the query from an optional sort flag. A flag counts
 // only as the last token, so a query may still contain the characters.
 func parseSearchArgs(text string) (query, sortMode, parseError string) {
-	args := splitArgs(text)
+	args := searchTerms(text)
 	if len(args) == 0 {
 		return text, "", ""
 	}
@@ -401,43 +406,21 @@ func parseSearchArgs(text string) (query, sortMode, parseError string) {
 	return strings.Join(args, " "), sortMode, ""
 }
 
-// splitArgs splits on whitespace while honouring quoted runs, the part of
-// shell-style parsing that matters for a search query.
-func splitArgs(text string) []string {
-	var (
-		args    []string
-		current strings.Builder
-		quote   rune
-		started bool
-	)
-	flush := func() {
-		if started {
-			args = append(args, current.String())
-			current.Reset()
-			started = false
+// searchTerms splits a query into words. A search query is prose, not a shell
+// command, so nothing here can fail and no character is special: an apostrophe
+// in "Marvel's Spider-Man 2" used to open a quoted run that never closed,
+// which swallowed the rest of the line -- including a trailing --mx, so the
+// sort was silently dropped. Surrounding quotes are still trimmed, for anyone
+// who quotes a phrase out of habit, but an internal apostrophe is kept: the
+// indexers match titles literally, and "Marvels" does not find "Marvel's".
+func searchTerms(text string) []string {
+	var terms []string
+	for _, field := range strings.Fields(text) {
+		if field = strings.Trim(field, `'"`); field != "" {
+			terms = append(terms, field)
 		}
 	}
-
-	for _, r := range text {
-		switch {
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			} else {
-				current.WriteRune(r)
-			}
-		case r == '\'' || r == '"':
-			quote = r
-			started = true
-		case r == ' ' || r == '\t' || r == '\n':
-			flush()
-		default:
-			current.WriteRune(r)
-			started = true
-		}
-	}
-	flush()
-	return args
+	return terms
 }
 
 func newToken(length int) (string, error) {

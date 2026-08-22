@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -269,7 +270,14 @@ func (b *Bot) parseCommand(text string) (command, args string, ok bool) {
 	if !strings.HasPrefix(text, "/") {
 		return "", "", false
 	}
-	head, rest, _ := strings.Cut(text[1:], " ")
+	// The command word ends at the first whitespace of any kind. Splitting on a
+	// literal space instead loses the arguments of "/grab\n<id>\n<id>", which is
+	// how a list of IDs pastes out of a search result.
+	body := text[1:]
+	head, rest := body, ""
+	if cut := strings.IndexFunc(body, unicode.IsSpace); cut >= 0 {
+		head, rest = body[:cut], body[cut:]
+	}
 	if head == "" {
 		return "", "", false
 	}

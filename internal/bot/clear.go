@@ -9,6 +9,11 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+// clearCancelledMessage confirms a /clear the user backed out of. Like
+// redactedMessage it reports on the message rather than carrying content, so
+// it is plain text.
+const clearCancelledMessage = "CLEAR CANCELLED"
+
 // clearSession is a pending /clear waiting on its confirmation button.
 type clearSession struct {
 	userID     int64
@@ -194,7 +199,7 @@ func (b *Bot) onClearCallback(cb *callback) error {
 	switch action {
 	case "cancel":
 		b.takeClear(token)
-		if err := b.edit(cb.ctx, cb.peer, cb.msgID, "<code>CLEAR CANCELLED</code>"); err != nil {
+		if err := b.edit(cb.ctx, cb.peer, cb.msgID, clearCancelledMessage); err != nil {
 			b.log.Debug("Could not mark clear cancelled", "err", err)
 		}
 		return b.answer(cb.ctx, cb.queryID, "Cancelled", false)
