@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/gotd/td/session"
@@ -99,6 +100,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	client := telegram.NewClient(b.cfg.APIID, b.cfg.APIHash, telegram.Options{
 		SessionStorage: &session.FileStorage{Path: b.cfg.SessionFile},
 		UpdateHandler:  gaps,
+		Middlewares:    []telegram.Middleware{floodWaiter(b.log)},
 	})
 
 	return client.Run(ctx, func(ctx context.Context) error {
@@ -232,9 +234,21 @@ func (b *Bot) onMessage(e tg.Entities, upd message.AnswerableMessageUpdate) {
 	// the update loop for every other chat.
 	go func() {
 		defer b.recoverPanic("command " + command)
-		if err := handler(c); err != nil {
+
+		// lag is how long the command sat between being typed and reaching the
+		// handler, which is the half of a slow command this bot does not
+		// control. Without it, a delayed delivery and a slow handler look
+		// exactly alike from the chat.
+		start := time.Now()
+		lag := start.Sub(time.Unix(int64(c.msg.Date), 0))
+
+		err := handler(c)
+		if err != nil {
 			b.log.Error("Handler failed", "command", command, "err", err)
 		}
+		b.log.Info("Command handled", "command", command, "chat_id", c.chatID,
+			"user_id", c.userID, "lag", lag.Round(time.Millisecond),
+			"took", time.Since(start).Round(time.Millisecond), "ok", err == nil)
 	}()
 }
 
