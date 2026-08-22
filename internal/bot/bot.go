@@ -21,6 +21,7 @@ import (
 	"github.com/avikekkk/nzbget-usenet-bot-go/internal/indexers"
 	"github.com/avikekkk/nzbget-usenet-bot-go/internal/nzbget"
 	"github.com/avikekkk/nzbget-usenet-bot-go/internal/store"
+	"github.com/avikekkk/nzbget-usenet-bot-go/internal/telegraph"
 )
 
 // Bot holds everything the handlers need.
@@ -48,7 +49,10 @@ type Bot struct {
 
 	// Sessions are capped, and the order slices give the map an insertion
 	// order to evict by.
-	searches    map[string]*searchSession
+	searches map[string]*searchSession
+	// One Telegraph account is shared by every search; see telegraphAccount.
+	telegraphMu sync.Mutex
+	telegraph   *telegraph.Client
 	searchOrder []string
 	clears      map[string]*clearSession
 	clearOrder  []string

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gotd/td/telegram/message/markup"
@@ -39,11 +40,61 @@ type searchSession struct {
 	sortMode string
 	userID   int64
 
+	// The Telegraph page is published after the results are already on screen,
+	// so these are written by that goroutine while the pagination callbacks
+	// read them. mu covers everything below it.
+	mu            sync.Mutex
+	page          int
 	telegraph     *telegraph.Client
 	telegraphURL  string
 	telegraphPath string
+	redacted      bool
 
 	cancelRedact context.CancelFunc
+}
+
+// setTelegraph records a freshly published page and reports whether it is
+// still wanted. A session redacted while the page was being built keeps its
+// URL off the keyboard, and the caller blanks the page instead.
+func (s *searchSession) setTelegraph(client *telegraph.Client, url, path string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.redacted {
+		return false
+	}
+	s.telegraph, s.telegraphURL, s.telegraphPath = client, url, path
+	return true
+}
+
+// telegraphURLValue is the published page, or "" while it is still being made.
+func (s *searchSession) telegraphURLValue() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.telegraphURL
+}
+
+// markRedacted closes the session to further publishing and hands back the
+// page to blank, if one exists yet.
+func (s *searchSession) markRedacted() (*telegraph.Client, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.redacted = true
+	return s.telegraph, s.telegraphPath
+}
+
+// setPage and currentPage track which page is on screen, so the edit that adds
+// the Telegraph button does not drag a user who has already paged on back to
+// the first page.
+func (s *searchSession) setPage(page int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.page = page
+}
+
+func (s *searchSession) currentPage() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.page
 }
 
 // handleSearch queries the indexers and posts the first page of results.
@@ -76,7 +127,10 @@ func (b *Bot) handleSearch(c *Ctx) error {
 		return err
 	}
 
+	start := time.Now()
 	results, found, err := b.idx.Search(c.ctx, query, sortMode)
+	b.log.Info("Search complete", "query", query, "sort", sortMode,
+		"results", len(results), "found", found, "took", time.Since(start).Round(time.Millisecond))
 	if err != nil {
 		b.log.Error("Error occurred while searching", "err", err)
 		return c.Edit(notice.ID, "Error occurred while searching")
@@ -92,8 +146,6 @@ func (b *Bot) handleSearch(c *Ctx) error {
 		sortMode: sortMode,
 		userID:   c.userID,
 	}
-	b.publishTelegraph(c.ctx, session, results)
-
 	token, err := newToken(8)
 	if err != nil {
 		return err
@@ -116,16 +168,37 @@ func (b *Bot) handleSearch(c *Ctx) error {
 		return err
 	}
 	b.scheduleAutoRedact(token, target, sent.ID)
+
+	// The Telegraph mirror is published only now. Building it first meant every
+	// search waited on two more round trips before a single result appeared,
+	// for a button most searches never use. The keyboard is edited once the
+	// page exists, on whichever page the reader has since turned to.
+	go func() {
+		defer b.recoverPanic("telegraph publish")
+
+		if !b.publishTelegraph(b.runCtx, session, results) {
+			return
+		}
+		if b.getSearch(token) == nil {
+			return
+		}
+		page := session.currentPage()
+		text, totalPages, safePage := b.searchPageText(session, page)
+		if err := b.editMarkup(b.runCtx, target, sent.ID, text, b.searchMarkup(token, session, safePage, totalPages)); err != nil {
+			b.log.Debug("Could not attach the Telegraph button", "err", err)
+		}
+	}()
 	return nil
 }
 
-// publishTelegraph mirrors the full result list to a Telegraph page. A failure
-// only costs the URL button, so it is logged rather than surfaced.
-func (b *Bot) publishTelegraph(ctx context.Context, session *searchSession, results []indexers.Result) {
-	client, err := telegraph.NewAccount(ctx, "NZBSearch")
+// publishTelegraph mirrors the full result list to a Telegraph page and
+// reports whether the page is live and wanted. A failure only costs the URL
+// button, so it is logged rather than surfaced.
+func (b *Bot) publishTelegraph(ctx context.Context, session *searchSession, results []indexers.Result) bool {
+	client, err := b.telegraphAccount(ctx)
 	if err != nil {
 		b.log.Error("Telegraph failed", "err", err)
-		return
+		return false
 	}
 
 	content := make([]telegraph.Node, 0, len(results)*2)
@@ -144,25 +217,53 @@ func (b *Bot) publishTelegraph(ctx context.Context, session *searchSession, resu
 	page, err := client.CreatePage(ctx, telegraphTitle, telegraphAuthor, content)
 	if err != nil {
 		b.log.Error("Telegraph failed", "err", err)
-		return
+		return false
 	}
 
-	// The access token stays with the session: revoking it after creation
-	// leaves the page permanently uneditable, and so impossible to redact.
-	session.telegraph = client
-	session.telegraphURL = page.URL
-	session.telegraphPath = page.Path
+	if !session.setTelegraph(client, page.URL, page.Path) {
+		// Closed or auto-redacted while the page was being built. It lists every
+		// result and its NZB ID, so it cannot be left standing.
+		b.blankPage(ctx, client, page.Path)
+		return false
+	}
+	return true
+}
+
+// telegraphAccount returns the account every search publishes under, creating
+// it on first use. Making one per search cost a round trip before any result
+// could be shown, and left a new throwaway account behind each time.
+func (b *Bot) telegraphAccount(ctx context.Context) (*telegraph.Client, error) {
+	b.telegraphMu.Lock()
+	defer b.telegraphMu.Unlock()
+
+	if b.telegraph != nil {
+		return b.telegraph, nil
+	}
+	client, err := telegraph.NewAccount(ctx, "NZBSearch")
+	if err != nil {
+		return nil, err
+	}
+	b.telegraph = client
+	return client, nil
 }
 
 // redactTelegraph blanks the page that accompanies a search. It lists every
 // result and its NZB ID, so wiping only the Telegram message would leave the
 // whole thing public.
 func (b *Bot) redactTelegraph(ctx context.Context, session *searchSession) {
-	if session.telegraph == nil || session.telegraphPath == "" {
+	client, path := session.markRedacted()
+	b.blankPage(ctx, client, path)
+}
+
+// blankPage replaces a published page with a placeholder. The page is never
+// deleted, because Telegraph has no delete: blanking it is the only redaction
+// there is.
+func (b *Bot) blankPage(ctx context.Context, client *telegraph.Client, path string) {
+	if client == nil || path == "" {
 		return
 	}
 	content := []telegraph.Node{telegraph.Tag("p", telegraph.Text("REDACTED"))}
-	if err := session.telegraph.EditPage(ctx, session.telegraphPath, telegraphTitle, telegraphAuthor, content); err != nil {
+	if err := client.EditPage(ctx, path, telegraphTitle, telegraphAuthor, content); err != nil {
 		b.log.Error("Telegraph redact failed", "err", err)
 	}
 }
@@ -303,8 +404,8 @@ func (b *Bot) searchMarkup(token string, session *searchSession, page, totalPage
 	}
 
 	rows := []tg.KeyboardButtonRow{markup.Row(nav...)}
-	if session.telegraphURL != "" {
-		rows = append(rows, markup.Row(markup.URL("URL", session.telegraphURL)))
+	if url := session.telegraphURLValue(); url != "" {
+		rows = append(rows, markup.Row(markup.URL("URL", url)))
 	}
 	rows = append(rows, markup.Row(markup.Callback("CLOSE", []byte("srchc:"+token))))
 	return markup.InlineKeyboard(rows...)
@@ -360,6 +461,7 @@ func (b *Bot) onSearchCallback(cb *callback) error {
 	}
 
 	text, totalPages, safePage := b.searchPageText(session, page)
+	session.setPage(safePage)
 	keyboard := b.searchMarkup(token, session, safePage, totalPages)
 	if err := b.editMarkup(cb.ctx, cb.peer, cb.msgID, text, keyboard); err != nil {
 		b.log.Debug("Could not turn search page", "err", err)
