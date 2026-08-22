@@ -14,7 +14,6 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/message"
-	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 
@@ -95,11 +94,19 @@ func (b *Bot) Run(ctx context.Context) error {
 		return nil
 	})
 
-	gaps := updates.New(updates.Config{Handler: dispatcher})
-
+	// The dispatcher is wired straight to the client, with no gap manager in
+	// front of it. telegram/updates recovers missed updates for a user account
+	// by tracking a pts per chat; given a bot it tracked one per supergroup and,
+	// whenever it believed it had missed something, honoured the server's "do
+	// not ask again for N seconds" hint by sleeping it out -- discarding every
+	// update that arrived meanwhile and replaying them only once the timer
+	// expired. In a busy group that turned live updates into ~30s batches:
+	// commands measured 2.5s, 12s and 22.3s late while the handlers served them
+	// in about a second. Bots are pushed everything that concerns them and hold
+	// no update state to recover, so there is no gap to manage.
 	client := telegram.NewClient(b.cfg.APIID, b.cfg.APIHash, telegram.Options{
 		SessionStorage: &session.FileStorage{Path: b.cfg.SessionFile},
-		UpdateHandler:  gaps,
+		UpdateHandler:  updateLogger{next: dispatcher, bot: b},
 		Middlewares:    []telegram.Middleware{floodWaiter(b.log)},
 	})
 
@@ -126,7 +133,8 @@ func (b *Bot) Run(ctx context.Context) error {
 
 		b.log.Info("Telegram client initialised", "bot", "@"+self.Username)
 
-		return gaps.Run(ctx, b.api, self.ID, updates.AuthOptions{IsBot: true})
+		<-ctx.Done()
+		return ctx.Err()
 	})
 }
 
