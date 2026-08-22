@@ -1,0 +1,31 @@
+# Secrets and runtime config -- never commit these
+.env
+config.env
+*.env
+!*.env.example
+
+# Session file (contains a live login)
+session.json
+
+# Compiled binary
+/nzbget-bot
+
+# Runtime data: DATA_DIR defaults to the working directory
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+log.txt
+*.log
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Claude Code local overrides
+.claude/settings.local.json
