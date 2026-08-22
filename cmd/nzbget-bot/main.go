@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/avikekkk/nzbget-usenet-bot-go/internal/bot"
@@ -67,8 +68,11 @@ func run() error {
 }
 
 // openLog starts a fresh log each run, matching the previous behaviour of
-// removing log.txt at startup so /logs returns only the current session.
+// removing the log at startup so /logs returns only the current session.
 func openLog(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create log directory: %w", err)
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)

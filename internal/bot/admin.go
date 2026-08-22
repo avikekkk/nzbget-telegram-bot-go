@@ -2,6 +2,7 @@ package bot
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -74,7 +75,7 @@ func (b *Bot) handleLogs(c *Ctx) error {
 	}
 	_, err = b.sender.Reply(c.ents, c.upd).Media(c.ctx,
 		message.UploadedDocument(upload).
-			Filename("log.txt").
+			Filename(filepath.Base(b.cfg.LogFile)).
 			MIME("text/plain").
 			ForceFile(true))
 	return err

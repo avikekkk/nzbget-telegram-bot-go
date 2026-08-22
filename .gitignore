@@ -15,7 +15,7 @@ session.json
 *.db-journal
 *.sqlite
 *.sqlite3
-log.txt
+logs/
 *.log
 
 # Editors and OS

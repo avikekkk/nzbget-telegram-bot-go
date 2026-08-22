@@ -139,7 +139,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg.DataDir = dataDir
-	cfg.LogFile = filepath.Join(dataDir, "log.txt")
+	// logs/<binary>.log, the same shape the sibling clone bot uses, so a group
+	// running both gets two log uploads it can tell apart by name.
+	cfg.LogFile = filepath.Join(dataDir, "logs", "nzbgetbot.log")
 	cfg.DBFile = filepath.Join(dataDir, "bot.db")
 	cfg.SessionFile = filepath.Join(dataDir, "session.json")
 

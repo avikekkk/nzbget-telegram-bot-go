@@ -42,7 +42,7 @@ Optional:
 - `DOWNLOADER_NAME` (default: `NZBGet`)
 - `SEARCH_RESULTS_PER_PAGE` (default: `5`)
 - `AUTOREDACT` (default: `0` = off). Auto-redact search results after N seconds
-- `DATA_DIR` (default: working directory). Where `log.txt`, `bot.db` and `session.json` are written
+- `DATA_DIR` (default: working directory). Where `logs/nzbgetbot.log`, `bot.db` and `session.json` are written
 - `NZBHYDRA_API`
 - `NZBHYDRA_API_URL`
 - `NZBHYDRA_URL`
@@ -114,7 +114,7 @@ unauth - [id] remove authorization (admin only)
 The admin commands are listed for completeness; non-admins are rejected either way. To keep them out of the public menu, set the shorter list for the "All private chats" scope and the full list for your own chat only.
 
 ## Data files
-The bot writes `log.txt`, `bot.db` (SQLite) and `session.json` to `DATA_DIR`, which defaults
+The bot writes `logs/nzbgetbot.log`, `bot.db` (SQLite) and `session.json` to `DATA_DIR`, which defaults
 to the working directory it was started from — the same place `config.env` is
 read from. Set `DATA_DIR` to keep them somewhere fixed regardless of where the
 bot is launched.
