@@ -345,11 +345,17 @@ func (b *Bot) onMessage(e tg.Entities, upd message.AnswerableMessageUpdate) {
 	if !known {
 		return
 	}
+	allowed := b.isAuthorized(c.chatID, c.userID)
 	if sudoOnly {
-		if !b.isAdmin(c.userID) {
-			return
-		}
-	} else if !b.isAuthorized(c.chatID, c.userID) {
+		allowed = b.isAdmin(c.userID)
+	}
+	if !allowed {
+		b.log.Warn("Unauthorized command rejected", "command", command, "chat_id", c.chatID, "user_id", c.userID)
+		b.goHandle("unauthorized "+command, func() {
+			if _, err := c.Reply("<code>Unauthorized</code>"); err != nil {
+				b.log.Warn("Failed to send unauthorized reply", "err", err)
+			}
+		})
 		return
 	}
 
