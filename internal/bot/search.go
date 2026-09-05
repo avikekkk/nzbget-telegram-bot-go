@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -49,8 +50,29 @@ type searchSession struct {
 	telegraphURL  string
 	telegraphPath string
 	redacted      bool
+	// target and msgID locate the results message once it has been sent, so
+	// a session dropped for any reason can still be blanked on screen.
+	target tg.InputPeerClass
+	msgID  int
 
+	// cancelRedact stops the auto-redact timer. It is guarded by Bot.mu, not
+	// by mu above, because it is set and cleared alongside the session map.
 	cancelRedact context.CancelFunc
+}
+
+// setMessage records where the results were posted.
+func (s *searchSession) setMessage(target tg.InputPeerClass, msgID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.target = target
+	s.msgID = msgID
+}
+
+// message returns where the results were posted, if they were.
+func (s *searchSession) message() (tg.InputPeerClass, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.target, s.msgID
 }
 
 // setTelegraph records a freshly published page and reports whether it is
@@ -122,7 +144,7 @@ func (b *Bot) handleSearch(c *Ctx) error {
 		sortText = " (sorted by size: smallest first)"
 	}
 
-	notice, err := c.Reply("Searching NZBs" + sortText)
+	notice, err := c.Reply("Searching" + sortText)
 	if err != nil {
 		return err
 	}
@@ -133,7 +155,10 @@ func (b *Bot) handleSearch(c *Ctx) error {
 		"results", len(results), "found", found, "took", time.Since(start).Round(time.Millisecond))
 	if err != nil {
 		b.log.Error("Error occurred while searching", "err", err)
-		return c.Edit(notice.ID, "Error occurred while searching")
+		if errors.Is(err, indexers.ErrNoIndexers) {
+			return c.Edit(notice.ID, "No indexer configured, set NZBHYDRA_API_URL")
+		}
+		return c.Edit(notice.ID, b.failureText("Unexpected error"))
 	}
 	if len(results) == 0 {
 		return c.Edit(notice.ID, "No results")
@@ -167,6 +192,7 @@ func (b *Bot) handleSearch(c *Ctx) error {
 	if err != nil {
 		return err
 	}
+	session.setMessage(target, sent.ID)
 	b.scheduleAutoRedact(token, target, sent.ID)
 
 	// The Telegraph mirror is published only now. Building it first meant every
@@ -305,28 +331,52 @@ func (b *Bot) scheduleAutoRedact(token string, target tg.InputPeerClass, msgID i
 		if expired == nil {
 			return
 		}
-		b.redactTelegraph(b.runCtx, expired)
-		if err := b.edit(b.runCtx, target, msgID, redactedMessage); err != nil {
-			b.log.Debug("Could not mark results redacted", "err", err)
-		}
+		b.redactSession(b.runCtx, expired)
 	}()
+}
+
+// redactSession blanks everything a dropped session left in public: the
+// Telegraph page and the results message itself.
+func (b *Bot) redactSession(ctx context.Context, session *searchSession) {
+	b.redactTelegraph(ctx, session)
+	target, msgID := session.message()
+	if target == nil {
+		return
+	}
+	if err := b.edit(ctx, target, msgID, redactedMessage); err != nil {
+		b.log.Debug("Could not mark results redacted", "err", err)
+	}
 }
 
 func (b *Bot) storeSearch(token string, session *searchSession) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	b.searches[token] = session
 	b.searchOrder = append(b.searchOrder, token)
+
+	// Sessions pushed out by the cap are redacted like any other: their
+	// message and page list every result and NZB ID, and with the timer
+	// cancelled nothing else would ever hide them.
+	var evicted []*searchSession
 	for len(b.searchOrder) > maxSessions {
 		oldest := b.searchOrder[0]
 		b.searchOrder = b.searchOrder[1:]
-		if evicted, ok := b.searches[oldest]; ok {
-			if evicted.cancelRedact != nil {
-				evicted.cancelRedact()
+		if old, ok := b.searches[oldest]; ok {
+			if old.cancelRedact != nil {
+				old.cancelRedact()
+				old.cancelRedact = nil
 			}
 			delete(b.searches, oldest)
+			evicted = append(evicted, old)
 		}
+	}
+	b.mu.Unlock()
+
+	for _, old := range evicted {
+		old := old
+		go func() {
+			defer b.recoverPanic("evict search")
+			b.redactSession(b.runCtx, old)
+		}()
 	}
 }
 
@@ -337,7 +387,8 @@ func (b *Bot) getSearch(token string) *searchSession {
 }
 
 // takeSearch removes and returns a session, so a close and an auto-redact
-// firing together cannot both act on it.
+// firing together cannot both act on it. The auto-redact timer is stopped on
+// the way out, under the same lock that set it.
 func (b *Bot) takeSearch(token string) *searchSession {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -345,6 +396,10 @@ func (b *Bot) takeSearch(token string) *searchSession {
 	session, ok := b.searches[token]
 	if !ok {
 		return nil
+	}
+	if session.cancelRedact != nil {
+		session.cancelRedact()
+		session.cancelRedact = nil
 	}
 	delete(b.searches, token)
 	for i, candidate := range b.searchOrder {
@@ -428,9 +483,6 @@ func (b *Bot) onSearchCallback(cb *callback) error {
 			return b.answer(cb.ctx, cb.queryID, "Only requester can close this.", true)
 		}
 		if closed := b.takeSearch(token); closed != nil {
-			if closed.cancelRedact != nil {
-				closed.cancelRedact()
-			}
 			b.redactTelegraph(cb.ctx, closed)
 		}
 		if err := b.edit(cb.ctx, cb.peer, cb.msgID, redactedMessage); err != nil {

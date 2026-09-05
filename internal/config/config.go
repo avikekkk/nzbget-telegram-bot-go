@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -124,6 +125,15 @@ func Load() (*Config, error) {
 	cfg.NZBHydraAPI = os.Getenv("NZBHYDRA_API")
 	cfg.NZBHydraAPIURL = os.Getenv("NZBHYDRA_API_URL")
 	cfg.NZBHydraURL = os.Getenv("NZBHYDRA_URL")
+	// Optional, but when set it has to be a URL a request can be built on:
+	// a bare host or a relative path fails every /search with a protocol
+	// error that says nothing about the setting.
+	if cfg.NZBHydraAPIURL != "" {
+		parsed, err := url.Parse(cfg.NZBHydraAPIURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return nil, fmt.Errorf("NZBHYDRA_API_URL must be an absolute URL such as https://example.com/api")
+		}
+	}
 
 	cfg.SearchResultsPerPage = max(1, envInt("SEARCH_RESULTS_PER_PAGE", 5))
 	cfg.AutoRedact = max(0, envInt("AUTOREDACT", 0))

@@ -3,6 +3,7 @@ package indexers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,8 +78,15 @@ func TestSearchSorts(t *testing.T) {
 	set.byKey["demo"] = Indexer{Key: "demo"} // no API key: skipped
 
 	results, _, err := set.Search(context.Background(), "x", "max")
-	if err != nil || len(results) != 0 {
-		t.Fatalf("Search over a disabled indexer = %+v, %v", results, err)
+	if !errors.Is(err, ErrNoIndexers) || len(results) != 0 {
+		t.Fatalf("Search over a disabled indexer = %+v, %v; want ErrNoIndexers", results, err)
+	}
+
+	// An internal indexer with no API URL is just as unusable; previously it
+	// was queried anyway and every search failed with a protocol error.
+	set.byKey["nzbhydra"] = Indexer{Key: "nzbhydra", Internal: true}
+	if _, _, err := set.Search(context.Background(), "x", ""); !errors.Is(err, ErrNoIndexers) {
+		t.Fatalf("Search over an internal indexer without a URL = %v; want ErrNoIndexers", err)
 	}
 }
 

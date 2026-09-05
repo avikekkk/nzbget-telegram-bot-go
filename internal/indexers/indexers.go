@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -92,10 +93,12 @@ const MaxResults = 100
 // sortMode is "max" (largest first), "min" (smallest first) or "" (as found).
 func (s *Set) Search(ctx context.Context, query, sortMode string) ([]Result, int, error) {
 	var all []Result
+	searched := 0
 	for _, indexer := range s.byKey {
-		if indexer.API == "" && !indexer.Internal {
+		if !indexer.usable() {
 			continue
 		}
+		searched++
 		var (
 			results []Result
 			err     error
@@ -110,6 +113,9 @@ func (s *Set) Search(ctx context.Context, query, sortMode string) ([]Result, int
 		}
 		all = append(all, results...)
 	}
+	if searched == 0 {
+		return nil, 0, ErrNoIndexers
+	}
 
 	switch sortMode {
 	case "max":
@@ -123,6 +129,18 @@ func (s *Set) Search(ctx context.Context, query, sortMode string) ([]Result, int
 		all = all[:MaxResults]
 	}
 	return all, found, nil
+}
+
+// ErrNoIndexers means nothing is configured to search: an internal indexer
+// with no API URL, or a newznab one with no key, is skipped rather than asked.
+var ErrNoIndexers = errors.New("no indexer configured")
+
+// usable reports whether the indexer has enough configuration to be queried.
+func (i Indexer) usable() bool {
+	if i.Internal {
+		return i.APIURL != ""
+	}
+	return i.API != ""
 }
 
 // trimAPI strips a trailing "/api" path segment.
