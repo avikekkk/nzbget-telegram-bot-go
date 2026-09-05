@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,14 +38,14 @@ func (b *Bot) handleGrab(c *Ctx) error {
 	fromFile, err := b.grabFromFile(c)
 	if err != nil {
 		b.log.Error("Error while adding", "err", err)
-		_, replyErr := c.Reply("Error adding NZB file")
+		_, replyErr := c.Reply(b.failureText("Error adding NZB file"))
 		return replyErr
 	}
 
 	fromIDs, err := b.grabFromIDs(c)
 	if err != nil {
 		b.log.Error("Error while adding", "err", err)
-		_, replyErr := c.Reply("Error adding NZB file")
+		_, replyErr := c.Reply(b.failureText("Error adding NZB file"))
 		return replyErr
 	}
 
@@ -59,7 +60,12 @@ func (b *Bot) handleGrab(c *Ctx) error {
 // whether the reply was one, not whether the add succeeded.
 func (b *Bot) grabFromFile(c *Ctx) (bool, error) {
 	replied, err := b.repliedMessage(c)
-	if err != nil || replied == nil {
+	if err != nil {
+		// A failed lookup is not "no reply": reporting it as one tells the
+		// user their NZB ID was wrong when Telegram was the problem.
+		return true, fmt.Errorf("fetch replied message: %w", err)
+	}
+	if replied == nil {
 		return false, nil
 	}
 
@@ -73,23 +79,36 @@ func (b *Bot) grabFromFile(c *Ctx) (bool, error) {
 		return true, err
 	}
 
-	path := filepath.Join(os.TempDir(), strings.ReplaceAll(filename, "_", "."))
+	// A private temp file, never the attachment's own name: two grabs of
+	// "foo.nzb" at once would otherwise share a path, and a crafted name
+	// could point outside the temp directory.
+	tmp, err := os.CreateTemp("", "nzb-*.nzb")
+	if err != nil {
+		return true, fmt.Errorf("create temp file: %w", err)
+	}
+	filePath := tmp.Name()
+	tmp.Close()
+	defer func() {
+		if err := os.Remove(filePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			b.log.Error("Error while removing downloaded NZB", "path", filePath, "err", err)
+		}
+	}()
+
 	// Empty thumb size: the file itself, not a preview.
-	if _, err := b.downloader.Download(b.api, document.AsInputDocumentFileLocation("")).ToPath(c.ctx, path); err != nil {
-		return true, fmt.Errorf("download %s: %w", filename, err)
+	if _, err := b.downloader.Download(b.api, document.AsInputDocumentFileLocation("")).ToPath(c.ctx, filePath); err != nil {
+		return true, fmt.Errorf("download %s: %w", path.Base(filename), err)
 	}
 
 	notice, err := c.Reply("Adding .NZB file")
 	if err != nil {
-		os.Remove(path)
 		return true, err
 	}
 
-	nzbID, appendErr := b.nzb.AppendFile(c.ctx, path)
-	if err := os.Remove(path); err != nil {
-		b.log.Error("Error while removing downloaded NZB", "path", path, "err", err)
-	}
+	nzbID, appendErr := b.nzb.AppendFile(c.ctx, filePath)
 	if appendErr != nil {
+		if err := b.delete(c.ctx, target, notice.ID); err != nil {
+			b.log.Debug("Could not delete notice", "err", err)
+		}
 		return true, appendErr
 	}
 
@@ -314,25 +333,79 @@ func (b *Bot) appendInternal(ctx context.Context, resultID, apiURL string) (int6
 		return 0, errors.New("failed adding internally")
 	}
 
-	groups, err := b.nzb.ListGroups(ctx)
-	if err != nil {
-		return 0, err
-	}
+	// NZBHydra hands the NZB to NZBGet on its own schedule, so the queue may
+	// not list it on the first look.
+	for attempt := 0; ; attempt++ {
+		groups, err := b.nzb.ListGroups(ctx)
+		if err != nil {
+			return 0, err
+		}
 
-	// Newest match, not the first. Grabbing the same NZB again while the
-	// earlier copy is still unpacking leaves two entries with the same URL;
-	// returning the older one records the wrong NZBID against the user, so the
-	// download they just started could not be cancelled by them.
-	var newest int64
-	for _, group := range groups {
-		if strings.Contains(group.URL, resultID) && group.NZBID > newest {
-			newest = group.NZBID
+		// Newest match, not the first. Grabbing the same NZB again while the
+		// earlier copy is still unpacking leaves two entries with the same
+		// URL; returning the older one records the wrong NZBID against the
+		// user, so the download they just started could not be cancelled by
+		// them.
+		var newest int64
+		for _, group := range groups {
+			if urlReferencesID(group.URL, resultID) && group.NZBID > newest {
+				newest = group.NZBID
+			}
+		}
+		if newest != 0 {
+			return newest, nil
+		}
+		if attempt >= nzbIDLookupRetries {
+			return 0, fmt.Errorf("NZBID not found for: %s", resultID)
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(nzbIDLookupInterval):
 		}
 	}
-	if newest == 0 {
-		return 0, fmt.Errorf("NZBID not found for: %s", resultID)
+}
+
+// nzbIDLookupRetries and nzbIDLookupInterval bound how long appendInternal
+// waits for NZBHydra's hand-off to show up in the NZBGet queue.
+const (
+	nzbIDLookupRetries  = 5
+	nzbIDLookupInterval = time.Second
+)
+
+// urlReferencesID reports whether a queue entry's URL carries id as a whole
+// query value or path segment. A substring test matched result 123 against
+// result 1234 and recorded the wrong download against the user.
+func urlReferencesID(rawURL, id string) bool {
+	if id == "" {
+		return false
 	}
-	return newest, nil
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	for _, values := range parsed.Query() {
+		for _, value := range values {
+			if value == id {
+				return true
+			}
+		}
+	}
+	for _, segment := range strings.Split(parsed.Path, "/") {
+		if segment == id {
+			return true
+		}
+	}
+	return false
+}
+
+// failureText is the reply for a handler that failed: the given text, unless
+// the failure was the bot itself being restarted.
+func (b *Bot) failureText(text string) string {
+	if b.interrupted() {
+		return errInterrupted
+	}
+	return text
 }
 
 func (b *Bot) rememberTask(nzbID, userID int64) {
@@ -453,6 +526,7 @@ func (b *Bot) pollStatus(ctx context.Context, target tg.InputPeerClass, chat int
 		case tgerr.Is(err, "MESSAGE_ID_INVALID"), tgerr.Is(err, "MESSAGE_DELETE_FORBIDDEN"):
 			return
 		case errors.Is(err, context.Canceled):
+			b.reportInterrupted(ctx, target, session.msgID)
 			return
 		default:
 			// Backstop: give up rather than poll forever on an error we did
@@ -466,9 +540,22 @@ func (b *Bot) pollStatus(ctx context.Context, target tg.InputPeerClass, chat int
 
 		select {
 		case <-ctx.Done():
+			b.reportInterrupted(ctx, target, session.msgID)
 			return
 		case <-time.After(statusPollInterval):
 		}
+	}
+}
+
+// reportInterrupted marks a live status message as cut short by a restart.
+// A status replaced by a newer /status is cancelled too, but that one is
+// deleted by its successor, so only shutdown is worth announcing.
+func (b *Bot) reportInterrupted(ctx context.Context, target tg.InputPeerClass, msgID int) {
+	if !b.interrupted() {
+		return
+	}
+	if err := b.edit(ctx, target, msgID, errInterrupted); err != nil {
+		b.log.Debug("Could not mark status interrupted", "err", err)
 	}
 }
 

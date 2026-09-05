@@ -40,15 +40,19 @@ func (c *Ctx) FirstName() string {
 
 // Reply sends an HTML reply quoting the command message.
 func (c *Ctx) Reply(text string) (*tg.Message, error) {
+	ctx, cancel := c.bot.reporting(c.ctx)
+	defer cancel()
 	return unpack.Message(c.bot.sender.Reply(c.ents, c.upd).
-		StyledText(c.ctx, html.String(nil, text)))
+		StyledText(ctx, html.String(nil, text)))
 }
 
 // ReplyMarkup sends an HTML reply with an inline keyboard.
 func (c *Ctx) ReplyMarkup(text string, markup tg.ReplyMarkupClass) (*tg.Message, error) {
+	ctx, cancel := c.bot.reporting(c.ctx)
+	defer cancel()
 	return unpack.Message(c.bot.sender.Reply(c.ents, c.upd).
 		Markup(markup).
-		StyledText(c.ctx, html.String(nil, text)))
+		StyledText(ctx, html.String(nil, text)))
 }
 
 // Edit replaces the text of a message the bot sent in this chat.
@@ -70,16 +74,22 @@ func (c *Ctx) Delete(msgID int) error {
 }
 
 func (b *Bot) edit(ctx context.Context, target tg.InputPeerClass, msgID int, text string) error {
+	ctx, cancel := b.reporting(ctx)
+	defer cancel()
 	_, err := b.sender.To(target).Edit(msgID).StyledText(ctx, html.String(nil, text))
 	return err
 }
 
 func (b *Bot) editMarkup(ctx context.Context, target tg.InputPeerClass, msgID int, text string, markup tg.ReplyMarkupClass) error {
+	ctx, cancel := b.reporting(ctx)
+	defer cancel()
 	_, err := b.sender.To(target).Markup(markup).Edit(msgID).StyledText(ctx, html.String(nil, text))
 	return err
 }
 
 func (b *Bot) delete(ctx context.Context, target tg.InputPeerClass, msgID int) error {
+	ctx, cancel := b.reporting(ctx)
+	defer cancel()
 	_, err := b.sender.To(target).Revoke().Messages(ctx, msgID)
 	return err
 }
@@ -93,6 +103,8 @@ func (b *Bot) answer(ctx context.Context, queryID int64, text string, alert bool
 	if text != "" {
 		req.SetMessage(text)
 	}
+	ctx, cancel := b.reporting(ctx)
+	defer cancel()
 	_, err := b.api.MessagesSetBotCallbackAnswer(ctx, req)
 	return err
 }

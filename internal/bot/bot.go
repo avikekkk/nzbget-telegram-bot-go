@@ -39,8 +39,23 @@ type Bot struct {
 	username   string
 
 	// runCtx outlives an individual update, so handlers spawned as goroutines
-	// keep working after the dispatcher returns.
+	// keep working after the dispatcher returns. It ends when the process is
+	// asked to stop.
 	runCtx context.Context
+
+	// reportCtx stays alive for a grace period after runCtx ends, so a handler
+	// interrupted by shutdown can still tell the user what happened.
+	reportCtx context.Context
+
+	// ready is closed once the Telegram session is fully set up. Updates can
+	// arrive before then, and must not run against half-built plumbing.
+	ready chan struct{}
+
+	// handlers tracks in-flight commands; stopping refuses new ones once
+	// shutdown has begun, so Wait is never raced by a late Add.
+	handlers sync.WaitGroup
+	stopMu   sync.Mutex
+	stopping bool
 
 	mu        sync.Mutex
 	tasks     map[int64]int64 // NZBID -> owner user ID
@@ -71,6 +86,7 @@ func New(cfg *config.Config, logger *slog.Logger, db *store.Store, nzb *nzbget.C
 		statuses:  map[int64]*statusSession{},
 		searches:  map[string]*searchSession{},
 		clears:    map[string]*clearSession{},
+		ready:     make(chan struct{}),
 	}
 	for _, chatID := range cfg.AuthChats {
 		b.authChats[chatID] = true
@@ -78,19 +94,35 @@ func New(cfg *config.Config, logger *slog.Logger, db *store.Store, nzb *nzbget.C
 	return b
 }
 
+// shutdownGrace bounds how long a stop waits for in-flight commands to report
+// their final state before the Telegram connection is dropped.
+const shutdownGrace = 15 * time.Second
+
+// reportTimeout bounds one final send or edit made after shutdown has begun.
+const reportTimeout = 10 * time.Second
+
+// errInterrupted is what the user sees when a restart cut a command short.
+const errInterrupted = "Interrupted by a bot restart, please try again"
+
 // Run connects to Telegram and serves updates until ctx is cancelled.
 func (b *Bot) Run(ctx context.Context) error {
 	dispatcher := tg.NewUpdateDispatcher()
 	dispatcher.OnNewMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateNewMessage) error {
-		b.onMessage(e, u)
+		if b.waitReady(ctx) {
+			b.onMessage(e, u)
+		}
 		return nil
 	})
 	dispatcher.OnNewChannelMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateNewChannelMessage) error {
-		b.onMessage(e, u)
+		if b.waitReady(ctx) {
+			b.onMessage(e, u)
+		}
 		return nil
 	})
 	dispatcher.OnBotCallbackQuery(func(ctx context.Context, e tg.Entities, u *tg.UpdateBotCallbackQuery) error {
-		b.onCallback(e, u)
+		if b.waitReady(ctx) {
+			b.onCallback(e, u)
+		}
 		return nil
 	})
 
@@ -110,32 +142,108 @@ func (b *Bot) Run(ctx context.Context) error {
 		Middlewares:    []telegram.Middleware{floodWaiter(b.log)},
 	})
 
-	return client.Run(ctx, func(ctx context.Context) error {
-		if _, err := client.Auth().Bot(ctx, b.cfg.BotToken); err != nil {
+	b.api = client.API()
+	b.sender = message.NewSender(b.api)
+	b.uploader = uploader.NewUploader(b.api)
+	b.downloader = downloader.NewDownloader()
+
+	// The connection is deliberately not tied to the stop signal: it has to
+	// outlive it long enough for interrupted commands to report themselves.
+	// The callback below returns, and so ends the connection, once they have.
+	connCtx, disconnect := context.WithCancel(context.Background())
+	defer disconnect()
+
+	return client.Run(connCtx, func(connCtx context.Context) error {
+		if _, err := client.Auth().Bot(connCtx, b.cfg.BotToken); err != nil {
 			return fmt.Errorf("bot authorization: %w", err)
 		}
 
-		self, err := client.Self(ctx)
+		self, err := client.Self(connCtx)
 		if err != nil {
 			return fmt.Errorf("self: %w", err)
 		}
 
-		b.runCtx = ctx
-		b.api = client.API()
-		b.sender = message.NewSender(b.api)
-		b.uploader = uploader.NewUploader(b.api)
-		b.downloader = downloader.NewDownloader()
-		b.username = self.Username
-
-		if err := b.loadState(ctx); err != nil {
+		if err := b.loadState(connCtx); err != nil {
 			return err
 		}
 
+		b.username = self.Username
+		b.runCtx = ctx
+		b.reportCtx = connCtx
+		close(b.ready)
+
 		b.log.Info("Telegram client initialised", "bot", "@"+self.Username)
 
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-connCtx.Done():
+			return connCtx.Err()
+		}
+
+		// Refuse new commands, then give in-flight ones a moment to report
+		// their final state before the connection goes away.
+		b.stopMu.Lock()
+		b.stopping = true
+		b.stopMu.Unlock()
+
+		done := make(chan struct{})
+		go func() {
+			b.handlers.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(shutdownGrace):
+			b.log.Warn("Shutdown grace period elapsed with commands still running")
+		}
 		return ctx.Err()
 	})
+}
+
+// waitReady blocks an update until the session is set up. It reports false if
+// the update was abandoned first.
+func (b *Bot) waitReady(ctx context.Context) bool {
+	select {
+	case <-b.ready:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// goHandle runs fn off the update loop, tracked so shutdown can wait for it.
+// Once shutdown has begun the command is dropped: it would only be cancelled.
+func (b *Bot) goHandle(what string, fn func()) {
+	b.stopMu.Lock()
+	if b.stopping {
+		b.stopMu.Unlock()
+		b.log.Info("Ignoring update during shutdown", "what", what)
+		return
+	}
+	b.handlers.Add(1)
+	b.stopMu.Unlock()
+	go func() {
+		defer b.handlers.Done()
+		defer b.recoverPanic(what)
+		fn()
+	}()
+}
+
+// reporting returns the context a message send or edit should use. Normally
+// that is the caller's own; once shutdown has cancelled it, a bounded context
+// on the still-open connection takes over so the final state still reaches
+// the user rather than a status stuck mid-way.
+func (b *Bot) reporting(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil || b.reportCtx == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(b.reportCtx, reportTimeout)
+}
+
+// interrupted reports whether the bot is shutting down, which is the one
+// reason a cancelled handler should tell the user to try again.
+func (b *Bot) interrupted() bool {
+	return b.runCtx != nil && b.runCtx.Err() != nil
 }
 
 // loadState restores the authorized chats and task ownership from the
@@ -148,12 +256,14 @@ func (b *Bot) loadState(ctx context.Context) error {
 		return fmt.Errorf("load authorized chats: %w", err)
 	}
 	added := 0
+	b.mu.Lock()
 	for _, chatID := range stored {
 		if !b.authChats[chatID] {
 			b.authChats[chatID] = true
 			added++
 		}
 	}
+	b.mu.Unlock()
 	if added > 0 {
 		b.log.Info("Loaded authorized chats from database", "count", added)
 	}
@@ -162,7 +272,9 @@ func (b *Bot) loadState(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load tasks: %w", err)
 	}
+	b.mu.Lock()
 	b.tasks = tasks
+	b.mu.Unlock()
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -186,16 +298,19 @@ func (b *Bot) loadState(ctx context.Context) error {
 	}
 
 	var stale []int64
+	b.mu.Lock()
 	for nzbID := range b.tasks {
 		if !known[nzbID] {
 			stale = append(stale, nzbID)
 			delete(b.tasks, nzbID)
 		}
 	}
+	loaded := len(b.tasks)
+	b.mu.Unlock()
 	if err := b.store.RemoveTasks(stale); err != nil {
 		b.log.Error("Could not remove stale task owners", "err", err)
 	}
-	b.log.Info("Loaded task owners from database", "loaded", len(b.tasks), "dropped", len(stale))
+	b.log.Info("Loaded task owners from database", "loaded", loaded, "dropped", len(stale))
 	return nil
 }
 
@@ -240,9 +355,7 @@ func (b *Bot) onMessage(e tg.Entities, upd message.AnswerableMessageUpdate) {
 
 	// Handlers block on NZBGet and on Telegram; running them inline would stall
 	// the update loop for every other chat.
-	go func() {
-		defer b.recoverPanic("command " + command)
-
+	b.goHandle("command "+command, func() {
 		// lag is how long the command sat between being typed and reaching the
 		// handler, which is the half of a slow command this bot does not
 		// control. Without it, a delayed delivery and a slow handler look
@@ -257,7 +370,7 @@ func (b *Bot) onMessage(e tg.Entities, upd message.AnswerableMessageUpdate) {
 		b.log.Info("Command handled", "command", command, "chat_id", c.chatID,
 			"user_id", c.userID, "lag", lag.Round(time.Millisecond),
 			"took", time.Since(start).Round(time.Millisecond), "ok", err == nil)
-	}()
+	})
 }
 
 type handlerFunc func(*Ctx) error
@@ -331,7 +444,9 @@ func (b *Bot) isAuthorized(chatID, userID int64) bool {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.authChats[chatID]
+	// /auth in reply to a person records their user ID, which must work in
+	// any chat, not only their own private one.
+	return b.authChats[chatID] || b.authChats[userID]
 }
 
 func (b *Bot) recoverPanic(what string) {

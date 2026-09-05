@@ -47,10 +47,9 @@ func (b *Bot) onCallback(e tg.Entities, u *tg.UpdateBotCallbackQuery) {
 		return
 	}
 
-	go func() {
-		defer b.recoverPanic("callback " + cb.data)
+	b.goHandle("callback "+cb.data, func() {
 		if err := handler(cb); err != nil {
 			b.log.Error("Callback failed", "data", cb.data, "err", err)
 		}
-	}()
+	})
 }

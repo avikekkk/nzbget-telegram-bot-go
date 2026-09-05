@@ -20,6 +20,9 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// One connection: SQLite serialises writers anyway, and a second pooled
+	// connection only turns a concurrent read into "database is locked".
+	db.SetMaxOpenConns(1)
 	schema := []string{
 		"CREATE TABLE IF NOT EXISTS auth_chats (chat_id INTEGER PRIMARY KEY)",
 		"CREATE TABLE IF NOT EXISTS tasks (nzb_id INTEGER PRIMARY KEY, user_id INTEGER)",
