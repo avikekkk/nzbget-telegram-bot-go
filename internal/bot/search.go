@@ -144,7 +144,7 @@ func (b *Bot) handleSearch(c *Ctx) error {
 		sortText = " (sorted by size: smallest first)"
 	}
 
-	notice, err := c.Reply("Searching NZBs" + sortText)
+	notice, err := c.Reply("Searching" + sortText)
 	if err != nil {
 		return err
 	}
@@ -158,7 +158,7 @@ func (b *Bot) handleSearch(c *Ctx) error {
 		if errors.Is(err, indexers.ErrNoIndexers) {
 			return c.Edit(notice.ID, "No indexer configured, set NZBHYDRA_API_URL")
 		}
-		return c.Edit(notice.ID, b.failureText("Error occurred while searching"))
+		return c.Edit(notice.ID, b.failureText("Unexpected error"))
 	}
 	if len(results) == 0 {
 		return c.Edit(notice.ID, "No results")
