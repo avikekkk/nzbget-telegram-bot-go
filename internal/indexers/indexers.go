@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"sort"
@@ -54,6 +55,7 @@ type Set struct {
 
 // New builds the indexer set from configuration.
 func New(cfg *config.Config) *Set {
+	jar, _ := cookiejar.New(nil) // New never fails with nil options.
 	return &Set{
 		byKey: map[string]Indexer{
 			"nzbhydra": {
@@ -65,7 +67,7 @@ func New(cfg *config.Config) *Set {
 				DelLimit: true,
 			},
 		},
-		http: &http.Client{Timeout: 60 * time.Second},
+		http: &http.Client{Timeout: 60 * time.Second, Jar: jar},
 	}
 }
 
@@ -305,17 +307,74 @@ func (s *Set) doJSON(ctx context.Context, method, endpoint string, body []byte, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
+	if token, err := s.xsrfToken(ctx, req.URL); err != nil {
+		return fmt.Errorf("%s %s: fetching XSRF token: %w", method, req.URL.Redacted(), err)
+	} else if token != "" {
+		req.Header.Set("X-XSRF-TOKEN", token)
+	}
 
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return err
+		return redactURLError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("%s %s returned %s", method, endpoint, resp.Status)
+		return fmt.Errorf("%s %s returned %s", method, req.URL.Redacted(), resp.Status)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// xsrfToken returns NZBHydra's HYDRA-XSRF-TOKEN cookie for target's host,
+// visiting the site root first if the jar has none. NZBHydra 9+ requires it
+// as the X-XSRF-TOKEN header on POST/PUT/DELETE to /internalapi. An empty
+// token means the server doesn't use CSRF protection.
+func (s *Set) xsrfToken(ctx context.Context, target *url.URL) (string, error) {
+	const cookieName = "HYDRA-XSRF-TOKEN"
+	if s.http.Jar == nil {
+		return "", nil
+	}
+	find := func() string {
+		for _, c := range s.http.Jar.Cookies(target) {
+			if c.Name == cookieName {
+				return c.Value
+			}
+		}
+		return ""
+	}
+	if token := find(); token != "" {
+		return token, nil
+	}
+
+	root := *target
+	root.Path = "/"
+	if i := strings.Index(target.Path, "/internalapi"); i >= 0 {
+		root.Path = target.Path[:i] + "/"
+	}
+	root.RawQuery = ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return "", redactURLError(err)
+	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	return find(), nil
+}
+
+// redactURLError strips credentials from the URL inside a transport error.
+func redactURLError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if u, perr := url.Parse(urlErr.URL); perr == nil {
+			urlErr.URL = u.Redacted()
+		}
+	}
+	return err
 }
 
 // anyToString renders a JSON value that may arrive as a number or a string.
