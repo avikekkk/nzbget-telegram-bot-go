@@ -114,12 +114,16 @@ func (b *Bot) grabFromFile(c *Ctx) (bool, error) {
 		return true, appendErr
 	}
 
-	b.rememberTask(nzbID, c.userID)
-	name := b.nzbName(c.ctx, nzbID)
+	name, rejected := b.nzbName(c.ctx, nzbID)
 
 	if err := b.delete(c.ctx, target, notice.ID); err != nil {
 		b.log.Error("Could not delete notice", "err", err)
 	}
+	if rejected {
+		_, err := c.Reply(skippedText([]string{name}))
+		return true, err
+	}
+	b.rememberTask(nzbID, c.userID)
 	if _, err := c.Reply(addedText([]string{name}, c.userID, c.FirstName())); err != nil {
 		return true, err
 	}
@@ -134,19 +138,41 @@ func addedText(names []string, userID int64, firstName string) string {
 		list, mention(userID, firstName))
 }
 
-// nzbName reads a queued download's name back from NZBGet.
-func (b *Bot) nzbName(ctx context.Context, nzbID int64) string {
+// skippedText reports downloads NZBGet accepted but moved straight to history,
+// such as an NZB identical to one already queued or downloaded.
+func skippedText(names []string) string {
+	list := escape(strings.Join(names, "\n\n"))
+	return fmt.Sprintf("<u><b>NZB SKIPPED</b></u>\n\n<code>%s</code>\n\nAlready queued or downloaded", list)
+}
+
+// nzbName reads a newly added download's name back from NZBGet. rejected
+// reports that NZBGet skipped it: a duplicate never enters the queue but goes
+// straight to history as DELETED/COPY or DELETED/DUPE, so only looking at the
+// queue would lose its name.
+func (b *Bot) nzbName(ctx context.Context, nzbID int64) (name string, rejected bool) {
+	unknown := fmt.Sprintf("Unable to retrieve NZB name for: '%d'", nzbID)
 	groups, err := b.nzb.ListGroups(ctx)
 	if err != nil {
 		b.log.Error("Could not read back NZB name", "nzb_id", nzbID, "err", err)
-		return fmt.Sprintf("Unable to retrieve NZB name for: '%d'", nzbID)
+		return unknown, false
 	}
 	for _, group := range groups {
 		if group.NZBID == nzbID {
-			return group.NZBName
+			return group.NZBName, false
 		}
 	}
-	return fmt.Sprintf("Unable to retrieve NZB name for: '%d'", nzbID)
+
+	history, err := b.nzb.History(ctx, true)
+	if err != nil {
+		b.log.Error("Could not read back NZB name", "nzb_id", nzbID, "err", err)
+		return unknown, false
+	}
+	for _, item := range history {
+		if item.NZBID == nzbID {
+			return item.NZBName, strings.HasPrefix(item.Status, "DELETED/")
+		}
+	}
+	return unknown, false
 }
 
 // nzbDocument reports whether a message carries an .nzb attachment.
@@ -261,7 +287,7 @@ func (b *Bot) grabFromIDs(c *Ctx) (bool, error) {
 		return false, nil
 	}
 
-	var added, failed []string
+	var added, skipped, failed []string
 	for _, token := range ids {
 		resultID, site, err := b.decodeNZBID(token)
 		if err != nil {
@@ -272,10 +298,14 @@ func (b *Bot) grabFromIDs(c *Ctx) (bool, error) {
 			continue
 		}
 
-		name, err := b.appendResult(c, resultID, site)
+		name, rejected, err := b.appendResult(c, resultID, site)
 		if err != nil {
 			b.log.Error("Error while adding", "token", token, "err", err)
 			failed = append(failed, token)
+			continue
+		}
+		if rejected {
+			skipped = append(skipped, name)
 			continue
 		}
 		added = append(added, name)
@@ -287,6 +317,12 @@ func (b *Bot) grabFromIDs(c *Ctx) (bool, error) {
 		}
 	}
 
+	if len(skipped) > 0 {
+		if _, err := c.Reply(skippedText(skipped)); err != nil {
+			return true, err
+		}
+	}
+
 	if len(failed) > 0 {
 		list := escape(strings.Join(failed, "\n"))
 		if _, err := c.Reply(fmt.Sprintf("<u><b>INVALID NZB IDS</b></u>\n\n<code>%s</code>", list)); err != nil {
@@ -294,34 +330,35 @@ func (b *Bot) grabFromIDs(c *Ctx) (bool, error) {
 		}
 	}
 
-	if len(failed) == len(ids) {
+	if len(added) == 0 {
 		return true, nil
 	}
 	return true, b.runStatus(c)
 }
 
 // appendResult queues one decoded search result and returns its NZB name.
-func (b *Bot) appendResult(c *Ctx, resultID, site string) (string, error) {
+// rejected reports that NZBGet skipped it as a duplicate.
+func (b *Bot) appendResult(c *Ctx, resultID, site string) (name string, rejected bool, err error) {
 	indexer, ok := b.idx.Get(site)
 	if !ok {
-		return "", fmt.Errorf("unknown site %q", site)
+		return "", false, fmt.Errorf("unknown site %q", site)
 	}
 
-	var (
-		nzbID int64
-		err   error
-	)
+	var nzbID int64
 	if site == "nzbhydra" && indexer.Internal {
 		nzbID, err = b.appendInternal(c.ctx, resultID, indexer.APIURL)
 	} else {
 		nzbID, err = b.nzb.AppendURL(c.ctx, indexer.DownloadURL(resultID))
 	}
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
-	b.rememberTask(nzbID, c.userID)
-	return b.nzbName(c.ctx, nzbID), nil
+	name, rejected = b.nzbName(c.ctx, nzbID)
+	if !rejected {
+		b.rememberTask(nzbID, c.userID)
+	}
+	return name, rejected, nil
 }
 
 // appendInternal hands the result to NZBHydra's downloader integration, then
