@@ -169,13 +169,15 @@ func (c *Client) appendCall(ctx context.Context, filename, content string) (int6
 	return id, nil
 }
 
-// AppendFile submits a local .nzb file.
-func (c *Client) AppendFile(ctx context.Context, path string) (int64, error) {
+// AppendFile submits a local .nzb file. NZBGet names the download after
+// name, not path, so the file can live at a temp path without the queue
+// showing it.
+func (c *Client) AppendFile(ctx context.Context, path, name string) (int64, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
 	}
-	return c.appendCall(ctx, path, base64.StdEncoding.EncodeToString(raw))
+	return c.appendCall(ctx, name, base64.StdEncoding.EncodeToString(raw))
 }
 
 // AppendURL asks NZBGet to fetch the NZB itself.
