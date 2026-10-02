@@ -120,7 +120,7 @@ func (b *Bot) grabFromFile(c *Ctx) (bool, error) {
 		b.log.Error("Could not delete notice", "err", err)
 	}
 	if rejected {
-		_, err := c.Reply(skippedText([]string{name}))
+		_, err := c.Reply(skippedText([]string{name}, c.userID, c.FirstName()))
 		return true, err
 	}
 	b.rememberTask(nzbID, c.userID)
@@ -140,9 +140,10 @@ func addedText(names []string, userID int64, firstName string) string {
 
 // skippedText reports downloads NZBGet accepted but moved straight to history,
 // such as an NZB identical to one already queued or downloaded.
-func skippedText(names []string) string {
+func skippedText(names []string, userID int64, firstName string) string {
 	list := escape(strings.Join(names, "\n\n"))
-	return fmt.Sprintf("<u><b>NZB SKIPPED</b></u>\n\n<code>%s</code>\n\nAlready queued or downloaded", list)
+	return fmt.Sprintf("<u><b>DUPE</b></u>\n\n<code>%s</code>\n\nby %s",
+		list, mention(userID, firstName))
 }
 
 // nzbName reads a newly added download's name back from NZBGet. rejected
@@ -318,7 +319,7 @@ func (b *Bot) grabFromIDs(c *Ctx) (bool, error) {
 	}
 
 	if len(skipped) > 0 {
-		if _, err := c.Reply(skippedText(skipped)); err != nil {
+		if _, err := c.Reply(skippedText(skipped, c.userID, c.FirstName())); err != nil {
 			return true, err
 		}
 	}
