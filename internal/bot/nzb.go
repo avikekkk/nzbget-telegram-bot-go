@@ -104,7 +104,9 @@ func (b *Bot) grabFromFile(c *Ctx) (bool, error) {
 		return true, err
 	}
 
-	nzbID, appendErr := b.nzb.AppendFile(c.ctx, filePath)
+	// The attachment's own name, not the temp path: NZBGet names the job
+	// after it, and the temp name would show up as "nzb-1234567890".
+	nzbID, appendErr := b.nzb.AppendFile(c.ctx, filePath, path.Base(filename))
 	if appendErr != nil {
 		if err := b.delete(c.ctx, target, notice.ID); err != nil {
 			b.log.Debug("Could not delete notice", "err", err)
