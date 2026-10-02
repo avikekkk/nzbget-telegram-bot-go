@@ -44,6 +44,7 @@ type HistoryItem struct {
 	NZBID   int64
 	Name    string
 	NZBName string
+	Status  string
 }
 
 // Status is the server-wide status snapshot.
@@ -137,6 +138,7 @@ func (c *Client) History(ctx context.Context, hidden bool) ([]HistoryItem, error
 			NZBID:   asInt(members["NZBID"]),
 			Name:    asString(members["Name"]),
 			NZBName: asString(members["NZBName"]),
+			Status:  asString(members["Status"]),
 		})
 	}
 	return history, nil
